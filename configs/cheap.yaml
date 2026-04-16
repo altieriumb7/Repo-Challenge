@@ -1,0 +1,7 @@
+run:
+  llm_enabled: false
+  disable_llm: true
+  audio_enabled: false
+  disable_audio: true
+thresholding:
+  target_suspect_fraction: 0.035

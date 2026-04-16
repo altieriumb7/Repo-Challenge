@@ -1,0 +1,3 @@
+transaction_id,event_time,amount,sender_id,recipient_id
+ev1,2026-01-02T00:00:00Z,20,u1,r1
+ev2,2026-01-02T00:05:00Z,700,u3,r2

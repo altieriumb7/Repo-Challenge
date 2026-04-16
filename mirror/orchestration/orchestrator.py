@@ -5,8 +5,8 @@ from mirror.agents.agents import (
     CommsRiskAgent,
     DecisionAgent,
     GeoRiskAgent,
-    PatternMemoryAgent,
     NetworkRiskAgent,
+    PatternMemoryAgent,
     ProfilerAgent,
     RuleSynthesisAgent,
     TemporalBehaviorAgent,
@@ -29,7 +29,10 @@ class Orchestrator:
         ]
 
     def run(self, ctx: PipelineContext) -> PipelineContext:
+        disabled = set(ctx.config.get("agents", {}).get("disable", []))
         for agent in self.agents:
+            if agent.name in disabled:
+                continue
             result = agent.run(ctx)
             ctx.agent_outputs[result.name] = result
         return ctx

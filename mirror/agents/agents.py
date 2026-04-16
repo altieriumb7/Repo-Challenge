@@ -336,6 +336,8 @@ class DecisionAgent(Agent):
         denom = sum(w for w, _ in weighted) or 1.0
         agg = sum(cases[c].fillna(0) * w for w, c in [(w, f"s_{n}") for n, w in weight_map.items() if f"s_{n}" in cases.columns]) / denom
         cases["score"] = agg.clip(0, 1)
+        sparse = (cases[[c for c in cases.columns if c.startswith("s_")]].fillna(0).sum(axis=1) <= 0.05)
+        cases.loc[sparse, "score"] = cases.loc[sparse, "score"] * 0.65
         cases["fraud_score"] = cases["score"]
         cases["evidence_confidence"] = cases["confidence"].clip(0, 1)
         cases["decision"] = np.where(cases["score"] >= ctx.config.get("thresholding", {}).get("prelim_decision_threshold", 0.72), "flag", "review")
