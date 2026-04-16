@@ -22,9 +22,11 @@ TRANSACTION_RENAME = {
 OPTIONAL_MODALITY_RENAMES = {
     "users": {"id": "user_id", "uid": "user_id"},
     "locations": {"uid": "user_id", "timestamp": "event_time", "lng": "lon", "longitude": "lon", "latitude": "lat"},
-    "sms": {"message": "text", "content": "text", "uid": "user_id"},
-    "mails": {"message": "body", "content": "body", "uid": "user_id", "email_body": "body"},
+    "sms": {"message": "text", "content": "text", "uid": "user_id", "sender_id": "user_id", "sms": "text"},
+    "mails": {"message": "text", "content": "text", "uid": "user_id", "sender_id": "user_id", "email_body": "text", "mail": "text"},
+    "audio": {"transcript": "text", "content": "text", "message": "text", "speaker_id": "user_id"},
 }
+TEXTUAL_COLUMN_ALIASES = ("text", "body", "transcript", "sms", "mail")
 
 
 def normalize_transactions(df: pd.DataFrame) -> pd.DataFrame:
@@ -59,6 +61,11 @@ def normalize_records(rows: list[dict[str, Any]], modality: str | None = None) -
     out = pd.json_normalize(rows)
     if modality and modality in OPTIONAL_MODALITY_RENAMES:
         out = out.rename(columns={k: v for k, v in OPTIONAL_MODALITY_RENAMES[modality].items() if k in out.columns})
+    if modality in {"sms", "mails", "audio"}:
+        for alias in TEXTUAL_COLUMN_ALIASES:
+            if alias in out.columns and "text" not in out.columns:
+                out = out.rename(columns={alias: "text"})
+                break
     if "event_time" in out.columns:
         out["event_time"] = pd.to_datetime(out["event_time"], utc=True, errors="coerce")
     return out

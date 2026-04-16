@@ -151,6 +151,22 @@ def run_pipeline(train_dir: str, eval_dir: str, output_dir: str, config: dict) -
         diag = summarize(decisions, ctx.agent_outputs)
         diag["llm_usage"] = llm_client.usage
         diag["llm_budget_usage"] = eval_data["llm_budget"].usage()
+        diag["modalities"] = eval_data.get("modality_diagnostics", {})
+        comms_diag = ctx.agent_outputs.get("CommsRiskAgent").diagnostics if ctx.agent_outputs.get("CommsRiskAgent") else {}
+        diag["communication_review"] = {
+            "records_considered": int(comms_diag.get("comms_records_considered", 0)),
+            "users_with_text": int(comms_diag.get("comms_users_with_text", 0)),
+            "users_escalated_to_llm": int(comms_diag.get("llm_escalated_users", 0)),
+            "llm_reviews_completed": int(comms_diag.get("llm_reviews", 0)),
+            "llm_skip_reason": comms_diag.get("llm_skip_reason", ""),
+        }
+        if diag["llm_usage"].get("calls", 0) == 0 and not diag["communication_review"]["llm_skip_reason"]:
+            if not run_cfg.get("llm_enabled", True) or run_cfg.get("disable_llm", False):
+                diag["communication_review"]["llm_skip_reason"] = "llm disabled by config"
+            elif not llm_client.api_key:
+                diag["communication_review"]["llm_skip_reason"] = "no API key"
+            elif diag["communication_review"]["users_escalated_to_llm"] == 0:
+                diag["communication_review"]["llm_skip_reason"] = "no suspicious clusters selected"
         diag["threshold"] = threshold
         diag["validation"] = _run_unsupervised_backtesting(decisions, seed=config.get("run", {}).get("random_seed", 42))
         diag["runtime_controls"] = config.get("run", {})

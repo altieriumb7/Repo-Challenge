@@ -4,8 +4,10 @@ import json
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 from mirror.agents.agents import CommsRiskAgent
+from mirror.data import loaders
 from mirror.data.loaders import load_modalities
 from mirror.features.builders import build_feature_matrix
 from mirror.pipeline import run_pipeline
@@ -82,6 +84,77 @@ def test_missing_modalities_no_crash(tmp_path: Path):
     data = load_modalities(d, config={"run": {"audio_enabled": False}})
     assert data["sms"].empty
     assert data["mails"].empty
+
+
+def test_sms_and_mail_aliases_normalize_to_text(tmp_path: Path):
+    d = tmp_path / "aliases"
+    d.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(
+        {
+            "transaction_id": ["x1"],
+            "event_time": ["2026-01-01T00:00:00Z"],
+            "amount": [1.0],
+            "sender_id": ["u1"],
+            "recipient_id": ["r1"],
+        }
+    ).to_csv(d / "transactions.csv", index=False)
+    (d / "sms.json").write_text(json.dumps([{"user_id": "u1", "sms": "urgent wire now"}]), encoding="utf-8")
+    (d / "mails.json").write_text(json.dumps([{"user_id": "u1", "mail": "verify account"}]), encoding="utf-8")
+    data = load_modalities(d, config={"run": {"audio_enabled": False}})
+    assert "text" in data["sms"].columns
+    assert "text" in data["mails"].columns
+    assert data["sms"].iloc[0]["text"] == "urgent wire now"
+    assert data["mails"].iloc[0]["text"] == "verify account"
+
+
+def test_audio_detection_and_missing_backend_does_not_crash(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    d = tmp_path / "audio_case"
+    _make_dataset(d)
+    audio_dir = d / "audio"
+    audio_dir.mkdir(parents=True, exist_ok=True)
+    (audio_dir / "u1_1.mp3").write_bytes(b"fake-mp3")
+
+    def _fake_unavailable(audio_paths: list[str], max_files: int, max_workers: int = 2):
+        return (
+            pd.DataFrame({"audio_path": audio_paths[:max_files], "text": [""], "user_id": ["u1"], "transcription_error": [True]}),
+            {"backend_available": False, "warning": "transcription unavailable: missing backend"},
+        )
+
+    monkeypatch.setattr(loaders, "_safe_transcribe", _fake_unavailable)
+    data = load_modalities(d, config={"run": {"audio_enabled": True, "transcribe_audio": True, "max_audio_files_to_transcribe": 10}})
+    assert data["modality_diagnostics"]["audio_detected"] is True
+    assert "transcription unavailable" in str(data["modality_diagnostics"]["audio_warning"])
+
+
+def test_audio_transcript_participates_in_comms_scoring():
+    tx = pd.DataFrame({"transaction_id": ["t1"], "sender_id": ["u1"], "burst_30m": [1]})
+    audio = pd.DataFrame({"user_id": ["u1"], "text": ["urgent verify account wire transfer"]})
+    ctx = PipelineContext(
+        scenario_name="x",
+        input_dir=".",
+        output_dir=".",
+        config={"run": {"llm_enabled": False, "disable_llm": True}},
+        data={"sms": pd.DataFrame(), "mails": pd.DataFrame(), "audio": audio},
+        features={"matrix": tx},
+    )
+    result = CommsRiskAgent().run(ctx)
+    assert float(result.evidence.iloc[0]["score"]) > 0.0
+
+
+def test_pipeline_reports_llm_skip_reason_when_no_api_key(tmp_path: Path):
+    train = tmp_path / "scenario - train"
+    eval_dir = tmp_path / "scenario - eval"
+    _make_dataset(train, "tr")
+    _make_dataset(eval_dir, "ev")
+    out = tmp_path / "out_diag"
+    cfg = {
+        "run": {"llm_enabled": True, "disable_llm": False, "audio_enabled": False, "parallel_agents": True, "max_messages_for_llm_review": 5},
+        "thresholding": {"min_suspect_fraction": 0.01, "max_suspect_fraction": 0.5, "target_suspect_fraction": 0.2},
+        "llm": {"timeout_seconds": 1, "max_retries": 0},
+    }
+    result = run_pipeline(str(train), str(eval_dir), str(out), cfg)
+    assert result["diagnostics"]["llm_usage"]["calls"] == 0
+    assert result["diagnostics"]["communication_review"]["llm_skip_reason"] in {"no API key", "no suspicious clusters selected"}
 
 
 def _pipeline_cfg(parallel_agents: bool) -> dict:
