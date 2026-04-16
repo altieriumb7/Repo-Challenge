@@ -10,7 +10,7 @@ def test_smoke_tiny_fixture(tmp_path: Path):
     eval_dir = Path("tests/fixtures/tiny_scenario/eval")
     out = tmp_path / "smoke"
     cfg = {
-        "run": {"llm_enabled": False, "disable_llm": True, "audio_enabled": False, "scenario_name": "tiny"},
+        "run": {"llm_enabled": False, "disable_llm": True, "audio_enabled": False, "parallel_agents": True, "scenario_name": "tiny"},
         "thresholding": {
             "min_suspect_fraction": 0.01,
             "max_suspect_fraction": 0.8,

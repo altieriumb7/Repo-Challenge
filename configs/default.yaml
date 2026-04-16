@@ -6,6 +6,11 @@ run:
   max_llm_calls_per_run: 80
   max_strong_model_calls: 8
   max_messages_for_llm_review: 25
+  parallel_agents: true
+  max_agent_workers: 4
+  max_llm_workers: 3
+  max_audio_workers: 2
+  fail_fast_parallel: true
   max_audio_files_to_transcribe: 10
   disable_llm: false
   disable_audio: false

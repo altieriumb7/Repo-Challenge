@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from threading import Lock
 
 import numpy as np
 import pandas as pd
@@ -46,8 +49,8 @@ class TemporalBehaviorAgent(Agent):
     def run(self, ctx: PipelineContext) -> AgentResult:
         f = ctx.features["matrix"]
         tx = ctx.data["linked_transactions"].sort_values("event_time").copy()
-        tx["payment_method"] = tx.get("payment_method", "unknown").astype(str)
-        tx["transaction_type"] = tx.get("transaction_type", "unknown").astype(str)
+        tx["payment_method"] = tx["payment_method"].astype(str) if "payment_method" in tx.columns else "unknown"
+        tx["transaction_type"] = tx["transaction_type"].astype(str) if "transaction_type" in tx.columns else "unknown"
         tx["hour"] = tx["event_time"].dt.hour.fillna(0).astype(int)
         tx["dow"] = tx["event_time"].dt.dayofweek.fillna(0).astype(int)
         tx["log_amount"] = np.log1p(tx["amount"].clip(lower=0))
@@ -206,25 +209,47 @@ class CommsRiskAgent(Agent):
         llm_cfg = ctx.config.get("llm", {})
         run_cfg = ctx.config.get("run", {})
         llm = ctx.data.get("llm_client")
-        llm_budget = int(llm_cfg.get("max_messages_for_llm_review", 25))
+        llm_budget = int(run_cfg.get("max_messages_for_llm_review", llm_cfg.get("max_messages_for_llm_review", 25)))
+        llm_workers = max(1, int(run_cfg.get("max_llm_workers", 3)))
         should_use_llm = bool(llm and run_cfg.get("llm_enabled", True) and not run_cfg.get("disable_llm", False))
         risky_users = tx.loc[tx["burst_30m"] > 0, "sender_id"].astype(str).unique().tolist()
         ranked = sorted(cheap_scores.items(), key=lambda x: x[1], reverse=True)[:llm_budget]
-        selected_users = {uid for uid, _ in ranked if uid in risky_users or _ > 0.6}
+        selected_users = sorted(uid for uid, user_score in ranked if uid in risky_users or user_score > 0.6)
         llm_map: dict[str, float] = {}
         llm_diag: dict[str, dict] = {}
+        llm_budget_obj = ctx.data.get("llm_budget")
         if should_use_llm:
-            for uid in selected_users:
+            model = ctx.config.get("model_fast", "openai/gpt-4o-mini")
+            prompt_cache: dict[str, dict] = {}
+            prompt_lock = Lock()
+
+            def _review(uid: str) -> tuple[str, float, dict]:
                 payload = {"messages": text_blobs.get(uid, [])[:6]}
                 prompt = COMMUNICATION_ANALYSIS_PROMPT.format(summary=json.dumps(payload, ensure_ascii=True))
-                raw = llm.complete(prompt, model=ctx.config.get("model_fast", "openai/gpt-4o-mini"))
+                with prompt_lock:
+                    cached = prompt_cache.get(prompt)
+                if cached is not None:
+                    return uid, float(cached["score"]), dict(cached["parsed"])
+                wait_start = time.perf_counter()
+                if llm_budget_obj and not llm_budget_obj.try_acquire(model=model, wait_time_seconds=time.perf_counter() - wait_start):
+                    return uid, 0.0, {"skipped": "llm_budget_exhausted"}
+                raw = llm.complete(prompt, model=model)
                 try:
                     parsed = json.loads(raw)
                 except Exception:
                     parsed = {"scam_probability": 0.55, "urgency_score": 0.5, "reasoning_summary": str(raw)[:220]}
                 llm_score = float(parsed.get("scam_probability", 0.5)) * 0.7 + float(parsed.get("urgency_score", 0.5)) * 0.3
-                llm_map[uid] = min(1.0, max(0.0, llm_score))
-                llm_diag[uid] = parsed
+                bounded = min(1.0, max(0.0, llm_score))
+                with prompt_lock:
+                    prompt_cache[prompt] = {"score": bounded, "parsed": parsed}
+                return uid, bounded, parsed
+
+            with ThreadPoolExecutor(max_workers=min(llm_workers, len(selected_users) or 1)) as pool:
+                futures = [pool.submit(_review, uid) for uid in selected_users]
+                for fut in as_completed(futures):
+                    uid, score_val, parsed = fut.result()
+                    llm_map[uid] = score_val
+                    llm_diag[uid] = parsed
         score = tx["sender_id"].astype(str).map(lambda u: cheap_scores.get(u, 0.0) * 0.7 + llm_map.get(u, 0.0) * 0.3).fillna(0.0)
         return AgentResult(
             name=self.name,
@@ -236,7 +261,12 @@ class CommsRiskAgent(Agent):
                     "reasons": [["comms-social-engineering"] for _ in range(len(tx))],
                 }
             ),
-            diagnostics={"llm_reviews": len(llm_diag), "llm_structured": llm_diag},
+            diagnostics={
+                "llm_reviews": len([v for v in llm_diag.values() if not v.get("skipped")]),
+                "llm_selected_users": len(selected_users),
+                "llm_workers": llm_workers,
+                "llm_structured": {k: llm_diag[k] for k in sorted(llm_diag)},
+            },
         )
 
 
@@ -248,9 +278,14 @@ class RuleSynthesisAgent(Agent):
         suspicious = f.nlargest(40, "sender_amount_zproxy")
         cluster_dump = suspicious[["transaction_id", "sender_id", "recipient_id", "amount", "off_hours", "edge_novelty"]].to_dict("records")
         llm = ctx.data.get("llm_client")
+        llm_budget_obj = ctx.data.get("llm_budget")
         summary = "LLM disabled"
+        model = ctx.config.get("model_fast", "openai/gpt-4o-mini")
         if llm and ctx.config.get("run", {}).get("llm_enabled", True) and not ctx.config.get("run", {}).get("disable_llm", False):
-            summary = llm.complete(PATTERN_SUMMARY_PROMPT.format(cluster_dump=cluster_dump), model=ctx.config.get("model_fast", "openai/gpt-4o-mini"))
+            if llm_budget_obj and not llm_budget_obj.try_acquire(model=model):
+                summary = "LLM budget exhausted"
+            else:
+                summary = llm.complete(PATTERN_SUMMARY_PROMPT.format(cluster_dump=cluster_dump), model=model)
         ev = pd.DataFrame({"transaction_id": f["transaction_id"], "score": 0.0, "confidence": 0.5, "reasons": [["rule-synthesis"] for _ in range(len(f))]})
         return AgentResult(name=self.name, evidence=ev, diagnostics={"pattern_summary": summary, "clusters": cluster_dump[:10]})
 

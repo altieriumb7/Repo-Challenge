@@ -3,5 +3,10 @@ run:
   disable_llm: true
   audio_enabled: false
   disable_audio: true
+  parallel_agents: true
+  max_agent_workers: 4
+  max_llm_workers: 2
+  max_audio_workers: 1
+  fail_fast_parallel: true
 thresholding:
   target_suspect_fraction: 0.035
