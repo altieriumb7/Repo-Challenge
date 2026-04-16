@@ -1,0 +1,30 @@
+run:
+  random_seed: 42
+  llm_enabled: true
+  disable_llm: false
+  audio_enabled: true
+  disable_audio: false
+  transcribe_audio: true
+  max_audio_files_to_transcribe: 10
+  max_llm_calls_per_run: 20
+  max_strong_model_calls: 5
+  max_messages_for_llm_review: 15
+  parallel_agents: true
+  max_agent_workers: 4
+  max_llm_workers: 3
+  max_audio_workers: 2
+  fail_fast_parallel: true
+  output_submission_name: submission.txt
+  allow_eval_to_train_memory: false
+
+thresholding:
+  min_suspect_fraction: 0.005
+  max_suspect_fraction: 0.2
+  target_suspect_fraction: 0.04
+  suspect_rate_lower_bound: 0.003
+  suspect_rate_upper_bound: 0.25
+
+llm:
+  timeout_seconds: 20
+  max_retries: 2
+  max_messages_for_llm_review: 15

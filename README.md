@@ -29,6 +29,18 @@ python -m mirror run-scenario --train-dir "data/My Scenario - train" --eval-dir 
 - Caching is enabled in `llm_cache/`.
 - No per-transaction LLM calls.
 - Comms LLM review supports bounded parallel workers (`run.max_llm_workers`) while respecting global budgets.
+- If `OPENROUTER_API_KEY` is missing, LLM review is skipped safely and the reason is written to diagnostics.
+
+## Communication modality normalization
+- `sms.json` supports `text`, `body`, `transcript`, `sms` and normalizes to canonical `text`.
+- `mails.json` supports `text`, `body`, `transcript`, `mail` and normalizes to canonical `text`.
+- Downstream communication analysis uses only canonical `text`.
+
+## Audio ingestion and transcription
+- If `<scenario>/audio/` exists and `run.audio_enabled: true`, MP3 files are detected.
+- If `run.transcribe_audio: true`, up to `run.max_audio_files_to_transcribe` files are transcribed.
+- Audio transcripts are normalized into the same `text` communication stream used for SMS/mail.
+- If transcription dependencies are missing, the run continues with a warning in diagnostics.
 
 ## Running modes
 - Cheap: `--config configs/cheap.yaml`
@@ -44,6 +56,15 @@ python -m mirror backtest --train-dir "data/My Scenario - train" --output-dir ou
 ```bash
 python -m mirror run-scenario --train-dir "data/My Scenario - train" --eval-dir "data/My Scenario - eval" --name my_scenario
 python -m mirror make-submission --train-dir "data/My Scenario - train" --eval-dir "data/My Scenario - eval" --output outputs/my_scenario/submission.txt
+```
+
+## Backtest and audio+LLM examples
+```bash
+# normal backtest
+python -m mirror backtest --train-dir "data/My Scenario - train" --output-dir outputs/backtest
+
+# train+eval with audio + selective LLM review
+python -m mirror run-scenario --train-dir "data/My Scenario - train" --eval-dir "data/My Scenario - eval" --name my_scenario --config configs/with_audio_llm.yaml
 ```
 
 ## Run all scenarios under a root

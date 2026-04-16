@@ -183,15 +183,18 @@ class CommsRiskAgent(Agent):
         mails = ctx.data.get("mails", pd.DataFrame())
         audio = ctx.data.get("audio", pd.DataFrame())
         text_blobs: dict[str, list[str]] = defaultdict(list)
+        comms_records_considered = 0
         for df in [sms, mails, audio]:
             if df.empty:
                 continue
-            text_col = "text" if "text" in df.columns else ("body" if "body" in df.columns else ("transcript" if "transcript" in df.columns else None))
+            text_col = "text" if "text" in df.columns else None
             user_col = "user_id" if "user_id" in df.columns else ("sender_id" if "sender_id" in df.columns else None)
             if not text_col or not user_col:
                 continue
             for uid, grp in df.groupby(user_col):
-                text_blobs[str(uid)].append(" ".join(grp[text_col].fillna("").astype(str).tolist()).lower())
+                messages = grp[text_col].fillna("").astype(str).tolist()
+                comms_records_considered += len(messages)
+                text_blobs[str(uid)].append(" ".join(messages).lower())
         patterns = {
             "urgency": r"\b(urgent|immediately|asap|act now)\b",
             "credential": r"\b(password|otp|verify account|pin)\b",
@@ -201,9 +204,11 @@ class CommsRiskAgent(Agent):
             "marketplace_delivery": r"\b(marketplace|delivery|parcel|shipment)\b",
         }
         cheap_scores = {}
+        hit_counts: dict[str, int] = {}
         for uid, blobs in text_blobs.items():
             txt = " ".join(blobs)
             hits = sum(1 for pat in patterns.values() if re.search(pat, txt))
+            hit_counts[uid] = hits
             cheap_scores[uid] = min(1.0, hits / 5)
 
         llm_cfg = ctx.config.get("llm", {})
@@ -211,13 +216,26 @@ class CommsRiskAgent(Agent):
         llm = ctx.data.get("llm_client")
         llm_budget = int(run_cfg.get("max_messages_for_llm_review", llm_cfg.get("max_messages_for_llm_review", 25)))
         llm_workers = max(1, int(run_cfg.get("max_llm_workers", 3)))
+        llm_skip_reason = ""
         should_use_llm = bool(llm and run_cfg.get("llm_enabled", True) and not run_cfg.get("disable_llm", False))
+        if run_cfg.get("disable_llm", False) or not run_cfg.get("llm_enabled", True):
+            llm_skip_reason = "llm disabled by config"
+        elif not llm:
+            llm_skip_reason = "llm client unavailable"
+        elif not getattr(llm, "api_key", ""):
+            llm_skip_reason = "no API key"
+            should_use_llm = False
         risky_users = tx.loc[tx["burst_30m"] > 0, "sender_id"].astype(str).unique().tolist()
         ranked = sorted(cheap_scores.items(), key=lambda x: x[1], reverse=True)[:llm_budget]
-        selected_users = sorted(uid for uid, user_score in ranked if uid in risky_users or user_score > 0.6)
+        selected_users = sorted(uid for uid, user_score in ranked if uid in risky_users or user_score >= 0.35 or hit_counts.get(uid, 0) >= 2)
+        llm_budget_obj = ctx.data.get("llm_budget")
+        if llm_budget_obj and llm_budget_obj.max_calls <= 0:
+            selected_users = []
+            llm_skip_reason = "budget exhausted"
+        if not selected_users and not llm_skip_reason:
+            llm_skip_reason = "no suspicious clusters selected"
         llm_map: dict[str, float] = {}
         llm_diag: dict[str, dict] = {}
-        llm_budget_obj = ctx.data.get("llm_budget")
         if should_use_llm:
             model = ctx.config.get("model_fast", "openai/gpt-4o-mini")
             prompt_cache: dict[str, dict] = {}
@@ -250,6 +268,9 @@ class CommsRiskAgent(Agent):
                     uid, score_val, parsed = fut.result()
                     llm_map[uid] = score_val
                     llm_diag[uid] = parsed
+        successful_reviews = len([v for v in llm_diag.values() if not v.get("skipped")])
+        if successful_reviews == 0 and any(v.get("skipped") == "llm_budget_exhausted" for v in llm_diag.values()) and not llm_skip_reason:
+            llm_skip_reason = "budget exhausted"
         score = tx["sender_id"].astype(str).map(lambda u: cheap_scores.get(u, 0.0) * 0.7 + llm_map.get(u, 0.0) * 0.3).fillna(0.0)
         return AgentResult(
             name=self.name,
@@ -262,9 +283,13 @@ class CommsRiskAgent(Agent):
                 }
             ),
             diagnostics={
-                "llm_reviews": len([v for v in llm_diag.values() if not v.get("skipped")]),
+                "llm_reviews": successful_reviews,
                 "llm_selected_users": len(selected_users),
+                "llm_escalated_users": len(selected_users),
                 "llm_workers": llm_workers,
+                "comms_records_considered": comms_records_considered,
+                "comms_users_with_text": len(text_blobs),
+                "llm_skip_reason": llm_skip_reason if successful_reviews == 0 else "",
                 "llm_structured": {k: llm_diag[k] for k in sorted(llm_diag)},
             },
         )
