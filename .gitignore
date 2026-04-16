@@ -3,3 +3,7 @@ __pycache__/
 .venv/
 *.pyc
 outputs/
+.env
+*.parquet
+*.log
+.DS_Store

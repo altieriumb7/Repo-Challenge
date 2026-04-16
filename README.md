@@ -1,142 +1,83 @@
-# Reply Mirror Fraud Challenge — Agent-Based Competition System
+# Reply Mirror Fraud Challenge — Competition-Ready Multi-Agent System
 
-Production-minded, **runnable** Python repository for the Reply Mirror fraud-detection challenge.
-
-## Multi-agent architecture
-The pipeline remains explicitly agent-based. Each agent contributes evidence with score + confidence:
-
-- **ProfilerAgent**: scenario + modality profiling
-- **TemporalBehaviorAgent**: rolling/decay user baselines, novelty, drift, bursts, sequence anomalies
-- **NetworkRiskAgent**: first-seen edges, fan-in/out anomalies, concentration spikes, shared recipients
-- **GeoRiskAgent**: mobility drift, impossible-travel heuristics, in-person consistency checks, weak-evidence penalties
-- **CommsRiskAgent**: cheap regex layer + selective structured LLM JSON analysis
-- **RuleSynthesisAgent**: selective cluster-level LLM synthesis
-- **PatternMemoryAgent**: motif extraction, persistence (`patterns.json`), and motif-based rescoring
-- **CaseManagerAgent**: evidence fusion into transaction case bundles
-- **DecisionAgent**: explainable weighted ensemble with configurable conservative/aggressive mode
-
-Design goals: evolving fraud resilience, hidden-set generalization, controlled false positives, and cost-aware selective LLM usage.
-
-## Cost-aware LLM strategy
-- LLM calls are optional and capped via config:
-  - `run.max_llm_calls_per_run`
-  - `run.max_strong_model_calls`
-  - `run.max_messages_for_llm_review`
-- Comms LLM runs only on suspicious clusters/users.
-- Borderline arbitration supports strong model escalation on a small budget.
-- All completions are cached on disk (`output/llm_cache`).
-- Token/call usage is written to diagnostics.
-
-## Repository layout
-
-```text
-mirror/
-  data/            # loaders, normalization, linking
-  features/        # transaction/user/geo/comms/graph features
-  agents/          # concrete agent implementations + evidence
-  llm/             # OpenRouter wrapper + prompts
-  memory/          # persistent memory per scenario output
-  orchestration/   # agent sequencing
-  calibration/     # unsupervised stress + thresholding
-  submissions/     # valid txt output writer
-  evaluation/      # diagnostics and contribution summaries
-  cli.py           # Typer CLI
-  pipeline.py      # run_pipeline entrypoint
-configs/
-  default.yaml
-tests/
-.env.example
-pyproject.toml
-```
-
-## Installation
-
+## Quickstart
 ```bash
-uv sync
-# or with pip:
-pip install -e .
+make install
+python -m mirror run-scenario --train-dir "data/My Scenario - train" --eval-dir "data/My Scenario - eval" --name my_scenario --output-dir outputs
 ```
 
-Optional extras:
+## Architecture (text diagram)
+1. **Load + Validate I/O** (`transactions.csv` required; optional users/locations/sms/mails/audio).
+2. **Entity Linking + Features** (shared transaction graph/temporal/comms/geo features).
+3. **Agent Layer**
+   - ProfilerAgent
+   - TemporalBehaviorAgent
+   - NetworkRiskAgent
+   - GeoRiskAgent
+   - CommsRiskAgent
+   - RuleSynthesisAgent
+   - PatternMemoryAgent
+   - CaseManagerAgent
+   - DecisionAgent
+4. **Adaptive Thresholding + Submission Safety Checks**
+5. **Artifacts** (submission, report, diagnostics, traces, reproducibility snapshots, experiment registry)
+
+## Agents and memory
+- Each risk agent writes evidence (`score`, `confidence`, `reasons`).
+- CaseManager merges evidence into case bundles.
+- DecisionAgent performs weighted ensemble arbitration.
+- Memory is persisted in `outputs/<scenario>/memory/`.
+- Eval leakage into train memory is blocked unless `run.allow_eval_to_train_memory=true`.
+
+## LLM constraints
+- LLM usage is optional and bounded by config (`max_llm_calls_per_run`, selective comms review).
+- Caching is enabled in `llm_cache/`.
+- No per-transaction LLM calls.
+
+## Running modes
+- Cheap: `--config configs/cheap.yaml`
+- Default: `--config configs/default.yaml`
+- Strong: `--config configs/strong.yaml`
+
+## Train-only backtest
 ```bash
-pip install -e '.[dev,observability]'
+python -m mirror backtest --train-dir "data/My Scenario - train" --output-dir outputs/backtest
 ```
 
-## Environment variables
-Copy `.env.example` and set keys as needed:
-
-- `OPENROUTER_API_KEY`
-- `MODEL_FAST`
-- `MODEL_STRONG`
-- `LANGFUSE_PUBLIC_KEY`
-- `LANGFUSE_SECRET_KEY`
-- `LANGFUSE_HOST`
-
-No secrets are committed.
-
-## Commands
-
-Run per scenario:
-
+## Train + eval inference + submission
 ```bash
-python -m mirror run --input-dir ".../Deus Ex - train" --output-dir outputs/deus_ex
-python -m mirror run --input-dir ".../Brave New World - train" --output-dir outputs/brave_new_world
-python -m mirror run --input-dir ".../The Truman Show - train" --output-dir outputs/truman_show
-
-# Batch mode (auto-discovers scenario folders with transactions.csv)
-python -m mirror run-all --data-root ".../train" --output-root outputs
+python -m mirror run-scenario --train-dir "data/My Scenario - train" --eval-dir "data/My Scenario - eval" --name my_scenario
+python -m mirror make-submission --train-dir "data/My Scenario - train" --eval-dir "data/My Scenario - eval" --output outputs/my_scenario/submission.txt
 ```
 
-Inspect diagnostics:
+## Run all scenarios under a root
 ```bash
-python -m mirror inspect --input-dir ".../Deus Ex - train"
+python -m mirror run-all --root-dir data --output-root outputs
 ```
 
-Backtest (time-aware unsupervised thresholding):
+## Ablation comparison
 ```bash
-python -m mirror backtest --input-dir ".../Deus Ex - train" --output-dir outputs/deus_ex_backtest
+python scripts/run_ablations.py --train-dir "...train" --eval-dir "...eval" --scenario my_scenario --output-root outputs/ablations
 ```
+Produces `ablation_results.csv`.
 
-Create challenge submission file:
-```bash
-python -m mirror make-submission --input-dir ".../Deus Ex - train" --output outputs/deus_ex_submission.txt
-```
-
-## Input modalities
-Expected in each scenario folder:
-- `transactions.csv` (required)
-- `users.json` (optional)
-- `locations.json` (optional)
-- `sms.json` (optional)
-- `mails.json` (optional)
-- `audio/*.mp3` (optional; disabled by default)
-
-The pipeline degrades gracefully if optional files are absent.
-
-## Output artifacts
-For each run output folder:
-- `submission.txt` (ASCII transaction IDs, one per line)
-- `cases.parquet` (machine-readable flagged case records)
-- `diagnostics.json`
-- `patterns.json` (persisted motif memory + pattern cards)
-- `traces.json` (agent run trace + budget summary)
-- `memory/memory.json`
-- `memory/decisions.parquet`
-- `llm_cache/*.json` (when LLM is used)
-
-## Reproducibility
-- Deterministic seed (`run.random_seed`)
-- Config-driven thresholds and suspect-rate guardrails
-- Cached LLM outputs
-- Persisted memory and decision parquet snapshots
-
-## Preparing for hidden eval sets
-Use identical command structure with the eval directory matching scenario format. No code changes needed.
-
-## Controls
+## Disable expensive components
 - Disable LLM: `run.disable_llm: true`
+- Disable comms agent: `agents.disable: ["CommsRiskAgent"]`
+- Disable geo agent: `agents.disable: ["GeoRiskAgent"]`
+- Disable graph agent: `agents.disable: ["NetworkRiskAgent"]`
 - Disable audio: `run.disable_audio: true`
-- Fast mode: `run.fast_mode: true`
-- Audio transcription (optional): `run.transcribe_audio: true` (gracefully degrades if backend unavailable)
 
-Both are disabled safely if keys/files are missing.
+## OpenRouter and Langfuse
+Set `.env` from `.env.example`:
+- `OPENROUTER_API_KEY`, `MODEL_FAST`, `MODEL_STRONG`
+- `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, `LANGFUSE_HOST`
+
+## Hidden-eval readiness
+- No hardcoded scenario names in runtime logic.
+- Scenario discovery is schema-based (`* - train` / `* - eval` folders with `transactions.csv`).
+- Supports re-evaluation on unseen folders with the same schema.
+
+## Optional audio dependency
+Install `pip install -e '.[audio]'` for Whisper-based transcription.
+If unavailable, pipeline degrades safely without failing.

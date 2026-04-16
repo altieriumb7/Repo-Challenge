@@ -10,11 +10,11 @@ from mirror.features.builders import build_feature_matrix
 from mirror.pipeline import run_pipeline
 
 
-def _make_dataset(root: Path) -> None:
+def _make_dataset(root: Path, prefix: str = "t") -> None:
     root.mkdir(parents=True, exist_ok=True)
     pd.DataFrame(
         {
-            "transaction_id": ["t1", "t2", "t3"],
+            "transaction_id": [f"{prefix}1", f"{prefix}2", f"{prefix}3"],
             "event_time": ["2026-01-01T10:00:00Z", "2026-01-01T10:05:00Z", "2026-01-02T23:10:00Z"],
             "amount": [10, 5000, 35],
             "sender_id": ["u1", "u1", "u2"],
@@ -28,7 +28,7 @@ def _make_dataset(root: Path) -> None:
 
 
 def test_loaders_and_features(tmp_path: Path):
-    d = tmp_path / "Deus Ex - train"
+    d = tmp_path / "sample"
     _make_dataset(d)
     data = load_modalities(d, config={"run": {"audio_enabled": False}})
     data["linked_transactions"] = data["transactions"]
@@ -38,25 +38,29 @@ def test_loaders_and_features(tmp_path: Path):
 
 
 def test_run_pipeline_and_submission(tmp_path: Path):
-    d = tmp_path / "Brave New World - train"
-    _make_dataset(d)
+    train = tmp_path / "scenario - train"
+    eval_dir = tmp_path / "scenario - eval"
+    _make_dataset(train, "tr")
+    _make_dataset(eval_dir, "ev")
     out = tmp_path / "out"
     cfg = {
         "run": {"random_seed": 42, "llm_enabled": False, "audio_enabled": False, "output_submission_name": "submission.txt"},
         "thresholding": {"min_suspect_fraction": 0.01, "max_suspect_fraction": 0.5, "target_suspect_fraction": 0.2},
         "llm": {"timeout_seconds": 1, "max_retries": 0},
     }
-    result = run_pipeline(str(d), str(out), cfg)
+    result = run_pipeline(str(train), str(eval_dir), str(out), cfg)
     sub = Path(result["submission"])
     assert sub.exists()
     assert sub.read_text(encoding="ascii").strip() != ""
+    assert (out / "submission.report.json").exists()
     assert (out / "cases.parquet").exists()
     assert (out / "patterns.json").exists()
     assert (out / "diagnostics.json").exists()
+    assert (out / "config.snapshot.json").exists()
 
 
 def test_missing_modalities_no_crash(tmp_path: Path):
-    d = tmp_path / "The Truman Show - train"
+    d = tmp_path / "minimal"
     d.mkdir(parents=True, exist_ok=True)
     pd.DataFrame(
         {

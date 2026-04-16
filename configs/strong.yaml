@@ -1,0 +1,6 @@
+run:
+  llm_enabled: true
+  max_llm_calls_per_run: 120
+  max_messages_for_llm_review: 35
+thresholding:
+  target_suspect_fraction: 0.05
