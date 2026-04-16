@@ -18,7 +18,7 @@ from mirror.memory.store import MemoryStore
 from mirror.orchestration.orchestrator import Orchestrator
 from mirror.runtime import StageProfiler, config_hash, env_snapshot, git_hash, memory_usage_mb, write_json
 from mirror.submissions.writer import write_submission
-from mirror.types import PipelineContext
+from mirror.types import LLMBudget, PipelineContext
 
 
 def _run_unsupervised_backtesting(decisions: pd.DataFrame, seed: int = 42) -> dict:
@@ -77,6 +77,11 @@ def run_pipeline(train_dir: str, eval_dir: str, output_dir: str, config: dict) -
         max_retries=config.get("llm", {}).get("max_retries", 2),
     )
     eval_data["llm_client"] = llm_client
+    run_cfg = config.get("run", {})
+    eval_data["llm_budget"] = LLMBudget(
+        max_calls=int(run_cfg.get("max_llm_calls_per_run", 80)),
+        max_strong_calls=int(run_cfg.get("max_strong_model_calls", 8)),
+    )
 
     with profiler.stage("build_features"):
         features = {"matrix": build_feature_matrix(eval_data)}
@@ -145,12 +150,23 @@ def run_pipeline(train_dir: str, eval_dir: str, output_dir: str, config: dict) -
 
         diag = summarize(decisions, ctx.agent_outputs)
         diag["llm_usage"] = llm_client.usage
+        diag["llm_budget_usage"] = eval_data["llm_budget"].usage()
         diag["threshold"] = threshold
         diag["validation"] = _run_unsupervised_backtesting(decisions, seed=config.get("run", {}).get("random_seed", 42))
         diag["runtime_controls"] = config.get("run", {})
+        diag["orchestrator"] = ctx.diagnostics.get("orchestrator", {})
         diag["profile"] = {
             "stages_seconds": profiler.timings,
             "peak_memory_mb": memory_usage_mb(),
+            "total_runtime_seconds": float(sum(profiler.timings.values())),
+            "agent_stages_seconds": ctx.diagnostics.get("orchestrator", {}).get("stage_runtimes_seconds", {}),
+            "agent_runtimes_seconds": ctx.diagnostics.get("orchestrator", {}).get("agent_runtimes_seconds", {}),
+            "parallel_workers": {
+                "max_agent_workers": int(config.get("run", {}).get("max_agent_workers", 4)),
+                "max_llm_workers": int(config.get("run", {}).get("max_llm_workers", 3)),
+                "max_audio_workers": int(config.get("run", {}).get("max_audio_workers", 2)),
+            },
+            "llm_queue_wait_seconds": float(eval_data["llm_budget"].usage().get("wait_time_seconds", 0.0)),
         }
 
         cfg_hash = config_hash(config)
@@ -161,6 +177,7 @@ def run_pipeline(train_dir: str, eval_dir: str, output_dir: str, config: dict) -
                 "scenario": scenario,
                 "agents_executed": list(ctx.agent_outputs.keys()),
                 "llm_calls": llm_client.usage.get("calls", 0),
+                "orchestrator_mode": "parallel" if config.get("run", {}).get("parallel_agents", True) else "serial",
                 "run_id": run_id,
                 "langfuse_run_id": config.get("run", {}).get("langfuse_run_id", run_id),
             },

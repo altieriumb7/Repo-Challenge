@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import pandas as pd
@@ -20,18 +21,27 @@ def _load_json(path: Path, modality: str) -> pd.DataFrame:
     return normalize_records(rows, modality=modality)
 
 
-def _safe_transcribe(audio_paths: list[str], max_files: int) -> pd.DataFrame:
+def _safe_transcribe(audio_paths: list[str], max_files: int, max_workers: int = 2) -> pd.DataFrame:
     rows = []
     try:
         import whisper  # type: ignore
 
         model = whisper.load_model("tiny")
-        for path in audio_paths[:max_files]:
+        subset = audio_paths[:max_files]
+
+        def _transcribe_one(path: str) -> dict:
             try:
                 out = model.transcribe(path)
-                rows.append({"audio_path": path, "transcript": out.get("text", "")})
+                return {"audio_path": path, "transcript": out.get("text", "")}
             except Exception:
-                rows.append({"audio_path": path, "transcript": "", "transcription_error": True})
+                return {"audio_path": path, "transcript": "", "transcription_error": True}
+
+        with ThreadPoolExecutor(max_workers=max(1, min(max_workers, len(subset) or 1))) as pool:
+            futures = {pool.submit(_transcribe_one, path): idx for idx, path in enumerate(subset)}
+            ordered = [None for _ in subset]
+            for fut in as_completed(futures):
+                ordered[futures[fut]] = fut.result()
+        rows = [r for r in ordered if r is not None]
     except Exception:
         return pd.DataFrame(
             {
@@ -75,7 +85,8 @@ def load_modalities(input_dir: str | Path, config: dict | None = None) -> dict[s
         paths = [str(p) for p in files]
         max_files = int(run_cfg.get("max_audio_files_to_transcribe", 10))
         if run_cfg.get("transcribe_audio", False):
-            audio_df = _safe_transcribe(paths, max_files=max_files)
+            max_audio_workers = int(run_cfg.get("max_audio_workers", 2))
+            audio_df = _safe_transcribe(paths, max_files=max_files, max_workers=max_audio_workers)
         else:
             audio_df = pd.DataFrame({"audio_path": paths[:max_files]})
 

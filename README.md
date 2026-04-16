@@ -10,15 +10,10 @@ python -m mirror run-scenario --train-dir "data/My Scenario - train" --eval-dir 
 1. **Load + Validate I/O** (`transactions.csv` required; optional users/locations/sms/mails/audio).
 2. **Entity Linking + Features** (shared transaction graph/temporal/comms/geo features).
 3. **Agent Layer**
-   - ProfilerAgent
-   - TemporalBehaviorAgent
-   - NetworkRiskAgent
-   - GeoRiskAgent
-   - CommsRiskAgent
-   - RuleSynthesisAgent
-   - PatternMemoryAgent
-   - CaseManagerAgent
-   - DecisionAgent
+   - Stage 0 (serial): ProfilerAgent
+   - Stage 1 (parallel): TemporalBehaviorAgent, NetworkRiskAgent, GeoRiskAgent, CommsRiskAgent
+   - Stage 2 (parallel): RuleSynthesisAgent, PatternMemoryAgent
+   - Stage 3 (serial): CaseManagerAgent -> DecisionAgent
 4. **Adaptive Thresholding + Submission Safety Checks**
 5. **Artifacts** (submission, report, diagnostics, traces, reproducibility snapshots, experiment registry)
 
@@ -33,6 +28,7 @@ python -m mirror run-scenario --train-dir "data/My Scenario - train" --eval-dir 
 - LLM usage is optional and bounded by config (`max_llm_calls_per_run`, selective comms review).
 - Caching is enabled in `llm_cache/`.
 - No per-transaction LLM calls.
+- Comms LLM review supports bounded parallel workers (`run.max_llm_workers`) while respecting global budgets.
 
 ## Running modes
 - Cheap: `--config configs/cheap.yaml`
@@ -67,6 +63,27 @@ Produces `ablation_results.csv`.
 - Disable geo agent: `agents.disable: ["GeoRiskAgent"]`
 - Disable graph agent: `agents.disable: ["NetworkRiskAgent"]`
 - Disable audio: `run.disable_audio: true`
+
+## Parallel/serial orchestration controls
+- Enable parallel agent stages (default): `run.parallel_agents: true`
+- Force serial orchestration: `run.parallel_agents: false`
+- Tune worker pools:
+  - `run.max_agent_workers`
+  - `run.max_llm_workers`
+  - `run.max_audio_workers`
+- Failure behavior:
+  - `run.fail_fast_parallel: true` stops immediately on stage failure.
+  - `run.fail_fast_parallel: false` allows noncritical parallel stage continuation, with errors logged in diagnostics.
+
+### Serial mode example
+```bash
+python -m mirror run-scenario --train-dir "data/My Scenario - train" --eval-dir "data/My Scenario - eval" --name my_scenario --config configs/serial.yaml
+```
+
+### Parallel mode example
+```bash
+python -m mirror run-scenario --train-dir "data/My Scenario - train" --eval-dir "data/My Scenario - eval" --name my_scenario --config configs/default.yaml
+```
 
 ## OpenRouter and Langfuse
 Set `.env` from `.env.example`:

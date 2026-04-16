@@ -2,5 +2,10 @@ run:
   llm_enabled: true
   max_llm_calls_per_run: 120
   max_messages_for_llm_review: 35
+  parallel_agents: true
+  max_agent_workers: 6
+  max_llm_workers: 3
+  max_audio_workers: 2
+  fail_fast_parallel: true
 thresholding:
   target_suspect_fraction: 0.05

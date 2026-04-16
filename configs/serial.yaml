@@ -1,0 +1,4 @@
+run:
+  parallel_agents: false
+  max_agent_workers: 1
+  fail_fast_parallel: true
