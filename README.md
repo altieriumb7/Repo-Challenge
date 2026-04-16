@@ -1,24 +1,29 @@
-# Reply Mirror Fraud Challenge — Agent-Based Baseline
+# Reply Mirror Fraud Challenge — Agent-Based Competition System
 
 Production-minded, **runnable** Python repository for the Reply Mirror fraud-detection challenge.
 
-## Why this is agent-based (not static scoring)
-The pipeline is built as a multi-agent system where each agent has explicit responsibility and contributes evidence:
+## Multi-agent architecture
+The pipeline remains explicitly agent-based. Each agent contributes evidence with score + confidence:
 
 - **ProfilerAgent**: scenario + modality profiling
-- **TemporalBehaviorAgent**: per-user behavioral drift and burst/off-hour anomalies
-- **NetworkRiskAgent**: sender/recipient graph novelty and degree outliers
-- **GeoRiskAgent**: location consistency risk
-- **CommsRiskAgent**: heuristic phishing/urgency indicators from SMS/email
-- **RuleSynthesisAgent**: selective LLM synthesis over high-risk clusters (never one-call-per-row)
+- **TemporalBehaviorAgent**: rolling/decay user baselines, novelty, drift, bursts, sequence anomalies
+- **NetworkRiskAgent**: first-seen edges, fan-in/out anomalies, concentration spikes, shared recipients
+- **GeoRiskAgent**: mobility drift, impossible-travel heuristics, in-person consistency checks, weak-evidence penalties
+- **CommsRiskAgent**: cheap regex layer + selective structured LLM JSON analysis
+- **RuleSynthesisAgent**: selective cluster-level LLM synthesis
+- **PatternMemoryAgent**: motif extraction, persistence (`patterns.json`), and motif-based rescoring
 - **CaseManagerAgent**: evidence fusion into transaction case bundles
-- **DecisionAgent**: final risk score for calibration and thresholding
+- **DecisionAgent**: explainable weighted ensemble with configurable conservative/aggressive mode
 
-This design supports evolving fraud strategies by combining temporal, graph, geo, and comms signals with persistent memory.
+Design goals: evolving fraud resilience, hidden-set generalization, controlled false positives, and cost-aware selective LLM usage.
 
 ## Cost-aware LLM strategy
-- LLM calls are **optional** and gated by config + API key.
-- LLM only runs for **cluster-level summarization**, not per transaction.
+- LLM calls are optional and capped via config:
+  - `run.max_llm_calls_per_run`
+  - `run.max_strong_model_calls`
+  - `run.max_messages_for_llm_review`
+- Comms LLM runs only on suspicious clusters/users.
+- Borderline arbitration supports strong model escalation on a small budget.
 - All completions are cached on disk (`output/llm_cache`).
 - Token/call usage is written to diagnostics.
 
@@ -76,7 +81,10 @@ Run per scenario:
 ```bash
 python -m mirror run --input-dir ".../Deus Ex - train" --output-dir outputs/deus_ex
 python -m mirror run --input-dir ".../Brave New World - train" --output-dir outputs/brave_new_world
-python -m mirror run --input-dir ".../The Truman Show - train" --output-dir outputs/truman
+python -m mirror run --input-dir ".../The Truman Show - train" --output-dir outputs/truman_show
+
+# Batch mode (auto-discovers scenario folders with transactions.csv)
+python -m mirror run-all --data-root ".../train" --output-root outputs
 ```
 
 Inspect diagnostics:
@@ -108,7 +116,10 @@ The pipeline degrades gracefully if optional files are absent.
 ## Output artifacts
 For each run output folder:
 - `submission.txt` (ASCII transaction IDs, one per line)
+- `cases.parquet` (machine-readable flagged case records)
 - `diagnostics.json`
+- `patterns.json` (persisted motif memory + pattern cards)
+- `traces.json` (agent run trace + budget summary)
 - `memory/memory.json`
 - `memory/decisions.parquet`
 - `llm_cache/*.json` (when LLM is used)
@@ -122,8 +133,10 @@ For each run output folder:
 ## Preparing for hidden eval sets
 Use identical command structure with the eval directory matching scenario format. No code changes needed.
 
-## Disable modalities
-- Disable LLM: `run.llm_enabled: false`
-- Disable audio: `run.audio_enabled: false`
+## Controls
+- Disable LLM: `run.disable_llm: true`
+- Disable audio: `run.disable_audio: true`
+- Fast mode: `run.fast_mode: true`
+- Audio transcription (optional): `run.transcribe_audio: true` (gracefully degrades if backend unavailable)
 
 Both are disabled safely if keys/files are missing.

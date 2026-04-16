@@ -2,6 +2,15 @@ run:
   random_seed: 42
   llm_enabled: true
   audio_enabled: false
+  transcribe_audio: false
+  max_llm_calls_per_run: 80
+  max_strong_model_calls: 8
+  max_messages_for_llm_review: 25
+  max_audio_files_to_transcribe: 10
+  disable_llm: false
+  disable_audio: false
+  fast_mode: false
+  decision_mode: conservative
   output_submission_name: submission.txt
 
 thresholding:
@@ -14,6 +23,23 @@ llm:
   max_retries: 2
   cluster_min_size: 5
   borderline_max_cases: 25
+  max_messages_for_llm_review: 25
+
+ensemble:
+  conservative:
+    TemporalBehaviorAgent: 0.24
+    NetworkRiskAgent: 0.22
+    GeoRiskAgent: 0.18
+    CommsRiskAgent: 0.18
+    PatternMemoryAgent: 0.14
+    RuleSynthesisAgent: 0.04
+  aggressive:
+    TemporalBehaviorAgent: 0.2
+    NetworkRiskAgent: 0.2
+    GeoRiskAgent: 0.14
+    CommsRiskAgent: 0.22
+    PatternMemoryAgent: 0.18
+    RuleSynthesisAgent: 0.06
 
 scenarios:
   Deus Ex - train:

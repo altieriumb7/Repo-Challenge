@@ -30,7 +30,7 @@ def _make_dataset(root: Path) -> None:
 def test_loaders_and_features(tmp_path: Path):
     d = tmp_path / "Deus Ex - train"
     _make_dataset(d)
-    data = load_modalities(d)
+    data = load_modalities(d, config={"run": {"audio_enabled": False}})
     data["linked_transactions"] = data["transactions"]
     feats = build_feature_matrix(data)
     assert "log_amount" in feats.columns
@@ -50,6 +50,9 @@ def test_run_pipeline_and_submission(tmp_path: Path):
     sub = Path(result["submission"])
     assert sub.exists()
     assert sub.read_text(encoding="ascii").strip() != ""
+    assert (out / "cases.parquet").exists()
+    assert (out / "patterns.json").exists()
+    assert (out / "diagnostics.json").exists()
 
 
 def test_missing_modalities_no_crash(tmp_path: Path):
@@ -64,6 +67,6 @@ def test_missing_modalities_no_crash(tmp_path: Path):
             "recipient_id": ["b"],
         }
     ).to_csv(d / "transactions.csv", index=False)
-    data = load_modalities(d)
+    data = load_modalities(d, config={"run": {"audio_enabled": False}})
     assert data["sms"].empty
     assert data["mails"].empty
