@@ -21,6 +21,17 @@ def run(input_dir: str, output_dir: str, config: str = "configs/default.yaml") -
     typer.echo(json.dumps(result, indent=2))
 
 
+@app.command("run-all")
+def run_all(data_root: str, output_root: str = "outputs", config: str = "configs/default.yaml") -> None:
+    root = Path(data_root)
+    results = {}
+    for scenario_dir in sorted([p for p in root.iterdir() if p.is_dir() and (p / "transactions.csv").exists()]):
+        slug = scenario_dir.name.lower().replace(" - train", "").replace(" ", "_")
+        out_dir = Path(output_root) / slug
+        results[scenario_dir.name] = run_pipeline(str(scenario_dir), str(out_dir), _resolved_cfg(config, str(scenario_dir)))
+    typer.echo(json.dumps(results, indent=2))
+
+
 @app.command()
 def inspect(input_dir: str, config: str = "configs/default.yaml") -> None:
     out = run_pipeline(input_dir, output_dir="outputs/inspect", config=_resolved_cfg(config, input_dir))

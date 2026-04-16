@@ -1,9 +1,15 @@
 from __future__ import annotations
 
+import json
+import re
+from collections import defaultdict
+from pathlib import Path
+
+import numpy as np
 import pandas as pd
 
 from mirror.agents.base import Agent
-from mirror.llm.prompts import PATTERN_SUMMARY_PROMPT
+from mirror.llm.prompts import ARBITRATION_PROMPT, COMMUNICATION_ANALYSIS_PROMPT, PATTERN_SUMMARY_PROMPT
 from mirror.types import AgentResult, PipelineContext
 
 
@@ -39,49 +45,239 @@ class TemporalBehaviorAgent(Agent):
 
     def run(self, ctx: PipelineContext) -> AgentResult:
         f = ctx.features["matrix"]
-        score = (f["sender_amount_zproxy"].clip(lower=0) / 4 + f["burst_30m"] * 0.4 + f["off_hours"] * 0.2).clip(0, 1)
-        return _evidence_from_score(f["transaction_id"], score, self.name, "temporal-drift", 0.78)
+        tx = ctx.data["linked_transactions"].sort_values("event_time").copy()
+        tx["payment_method"] = tx.get("payment_method", "unknown").astype(str)
+        tx["transaction_type"] = tx.get("transaction_type", "unknown").astype(str)
+        tx["hour"] = tx["event_time"].dt.hour.fillna(0).astype(int)
+        tx["dow"] = tx["event_time"].dt.dayofweek.fillna(0).astype(int)
+        tx["log_amount"] = np.log1p(tx["amount"].clip(lower=0))
+        tx["global_time_idx"] = np.arange(len(tx))
+
+        user_mean = tx.groupby("sender_id")["log_amount"].transform("mean").replace(0, 1e-6)
+        user_std = tx.groupby("sender_id")["log_amount"].transform("std").fillna(0.2).replace(0, 0.2)
+        rolling_mean = tx.groupby("sender_id")["log_amount"].transform(lambda s: s.rolling(8, min_periods=2).mean()).fillna(user_mean)
+        decay_mean = tx.groupby("sender_id")["log_amount"].transform(lambda s: s.ewm(alpha=0.35, adjust=False).mean())
+        amount_novelty = ((tx["log_amount"] - rolling_mean).abs() / (user_std + 1e-6)).clip(0, 6) / 6
+
+        tx["recipient_novelty"] = (tx.groupby(["sender_id", "recipient_id"]).cumcount() == 0).astype(float)
+        tx["tx_type_novelty"] = (tx.groupby(["sender_id", "transaction_type"]).cumcount() == 0).astype(float)
+        tx["payment_method_novelty"] = (tx.groupby(["sender_id", "payment_method"]).cumcount() == 0).astype(float)
+        hour_prob = tx.groupby(["sender_id", "hour"]).cumcount() / tx.groupby("sender_id").cumcount().clip(lower=1)
+        dow_prob = tx.groupby(["sender_id", "dow"]).cumcount() / tx.groupby("sender_id").cumcount().clip(lower=1)
+        hour_day_novelty = (1 - 0.5 * (hour_prob.fillna(0) + dow_prob.fillna(0))).clip(0, 1)
+
+        drift_user = (tx["log_amount"] - decay_mean).abs().clip(0, 5) / 5
+        global_roll = tx["log_amount"].rolling(50, min_periods=8).mean().fillna(tx["log_amount"].expanding().mean())
+        drift_global = (tx["log_amount"] - global_roll).abs().clip(0, 6) / 6
+        last_time = tx.groupby("sender_id")["event_time"].shift(1)
+        mins = ((tx["event_time"] - last_time).dt.total_seconds() / 60).fillna(1e6)
+        burst = (mins <= 10).astype(float)
+        sequence_count = tx.groupby(["sender_id", "recipient_id"]).cumcount()
+        sequence_anomaly = ((sequence_count == 0) & (tx.groupby("sender_id").cumcount() > 5)).astype(float)
+
+        score = (
+            amount_novelty * 0.2
+            + tx["recipient_novelty"] * 0.14
+            + tx["tx_type_novelty"] * 0.08
+            + tx["payment_method_novelty"] * 0.08
+            + hour_day_novelty * 0.12
+            + drift_user * 0.16
+            + drift_global * 0.08
+            + burst * 0.1
+            + sequence_anomaly * 0.04
+        ).clip(0, 1)
+        return _evidence_from_score(tx["transaction_id"], score, self.name, "temporal-drift-novelty", 0.81)
 
 
 class NetworkRiskAgent(Agent):
     name = "NetworkRiskAgent"
 
     def run(self, ctx: PipelineContext) -> AgentResult:
-        f = ctx.features["matrix"]
-        novelty = f["edge_novelty"] * 0.4 + (f["sender_out_degree"] > 12).astype(float) * 0.4 + (f["recipient_in_degree"] > 30).astype(float) * 0.2
-        return _evidence_from_score(f["transaction_id"], novelty.clip(0, 1), self.name, "network-anomaly", 0.72)
+        tx = ctx.data["linked_transactions"].sort_values("event_time").copy()
+        sender_deg = tx.groupby("sender_id")["recipient_id"].nunique()
+        recipient_deg = tx.groupby("recipient_id")["sender_id"].nunique()
+        edge_first = (tx.groupby(["sender_id", "recipient_id"]).cumcount() == 0).astype(float)
+        comp_size = tx.groupby("recipient_id")["sender_id"].transform("nunique")
+        rare_component = (1 / comp_size.clip(lower=1)).clip(0, 1)
+        fan_out = tx["sender_id"].map(sender_deg).fillna(0)
+        fan_in = tx["recipient_id"].map(recipient_deg).fillna(0)
+        unusualness = ((edge_first * np.log1p(fan_out + fan_in)) / np.log1p(fan_out.mean() + fan_in.mean() + 1)).clip(0, 1)
+        concentration = tx.groupby("sender_id")["recipient_id"].transform(lambda s: s.value_counts(normalize=True).iloc[0] if len(s) else 0)
+        concentration_spike = (concentration > 0.8).astype(float)
+        shared_recipient = (fan_in > 5).astype(float) * (fan_out <= 2).astype(float)
+        local_cluster_anomaly = ((fan_in > fan_in.quantile(0.95)) | (fan_out > fan_out.quantile(0.95))).astype(float)
+        score = (
+            edge_first * 0.2
+            + rare_component * 0.12
+            + unusualness * 0.18
+            + concentration_spike * 0.16
+            + shared_recipient * 0.16
+            + local_cluster_anomaly * 0.18
+        ).clip(0, 1)
+        return _evidence_from_score(tx["transaction_id"], score, self.name, "network-anomaly-graph", 0.76)
 
 
 class GeoRiskAgent(Agent):
     name = "GeoRiskAgent"
 
     def run(self, ctx: PipelineContext) -> AgentResult:
-        f = ctx.features["matrix"]
-        return _evidence_from_score(f["transaction_id"], f["geo_risk"].clip(0, 1), self.name, "geo-inconsistency", 0.65)
+        tx = ctx.data["linked_transactions"].sort_values("event_time").copy()
+        loc = ctx.data.get("locations", pd.DataFrame()).copy()
+        tx["geo_score"] = 0.0
+        tx["geo_conf"] = 0.45
+        if loc.empty or "user_id" not in loc.columns:
+            return _evidence_from_score(tx["transaction_id"], tx["geo_score"] + 0.2, self.name, "geo-weak-evidence", 0.4)
+        loc["event_time"] = pd.to_datetime(loc.get("event_time"), utc=True, errors="coerce")
+        for c in ["lat", "lon"]:
+            if c not in loc.columns:
+                loc[c] = np.nan
+        rows = []
+        for sender, grp in tx.groupby("sender_id"):
+            sender_loc = loc[loc["user_id"].astype(str) == str(sender)].sort_values("event_time")
+            if sender_loc.empty:
+                rows.extend([{"transaction_id": tid, "score": 0.3, "confidence": 0.35} for tid in grp["transaction_id"]])
+                continue
+            base_lat = sender_loc["lat"].median()
+            base_lon = sender_loc["lon"].median()
+            prev_t, prev_lat, prev_lon = None, None, None
+            for row in grp.itertuples(index=False):
+                if pd.isna(base_lat) or pd.isna(base_lon):
+                    rows.append({"transaction_id": row.transaction_id, "score": 0.25, "confidence": 0.35})
+                    continue
+                jump = abs(float(getattr(row, "lat", base_lat) if hasattr(row, "lat") else base_lat) - base_lat) + abs(float(getattr(row, "lon", base_lon) if hasattr(row, "lon") else base_lon) - base_lon)
+                geo_shift = min(1.0, jump / 8.0)
+                impossible = 0.0
+                if prev_t is not None and row.event_time is not pd.NaT:
+                    dt_h = max((row.event_time - prev_t).total_seconds() / 3600, 1e-3)
+                    speed_like = (abs(base_lat - prev_lat) + abs(base_lon - prev_lon)) / dt_h if prev_lat is not None else 0
+                    impossible = float(speed_like > 15)
+                in_person = str(getattr(row, "payment_method", "unknown")).lower() in {"cash", "card_present", "pos", "in_person"}
+                in_person_consistency = 0.0 if in_person and geo_shift < 0.2 else (0.2 if in_person else 0.0)
+                rows.append(
+                    {"transaction_id": row.transaction_id, "score": min(1.0, geo_shift * 0.5 + impossible * 0.35 + in_person_consistency), "confidence": 0.7 if not pd.isna(base_lat) else 0.35}
+                )
+                prev_t, prev_lat, prev_lon = row.event_time, base_lat, base_lon
+        geo = pd.DataFrame(rows)
+        return AgentResult(
+            name=self.name,
+            evidence=pd.DataFrame(
+                {
+                    "transaction_id": geo["transaction_id"].astype(str),
+                    "score": geo["score"].astype(float),
+                    "confidence": geo["confidence"].astype(float),
+                    "reasons": [["geo-mobility-drift"] for _ in range(len(geo))],
+                }
+            ),
+        )
 
 
 class CommsRiskAgent(Agent):
     name = "CommsRiskAgent"
 
     def run(self, ctx: PipelineContext) -> AgentResult:
-        f = ctx.features["matrix"]
-        score = (f["comms_score"] / 3).clip(0, 1)
-        return _evidence_from_score(f["transaction_id"], score, self.name, "phishing-signals", 0.69)
+        tx = ctx.features["matrix"][["transaction_id", "sender_id", "burst_30m"]].copy()
+        sms = ctx.data.get("sms", pd.DataFrame())
+        mails = ctx.data.get("mails", pd.DataFrame())
+        audio = ctx.data.get("audio", pd.DataFrame())
+        text_blobs: dict[str, list[str]] = defaultdict(list)
+        for df in [sms, mails, audio]:
+            if df.empty:
+                continue
+            text_col = "text" if "text" in df.columns else ("body" if "body" in df.columns else ("transcript" if "transcript" in df.columns else None))
+            user_col = "user_id" if "user_id" in df.columns else ("sender_id" if "sender_id" in df.columns else None)
+            if not text_col or not user_col:
+                continue
+            for uid, grp in df.groupby(user_col):
+                text_blobs[str(uid)].append(" ".join(grp[text_col].fillna("").astype(str).tolist()).lower())
+        patterns = {
+            "urgency": r"\b(urgent|immediately|asap|act now)\b",
+            "credential": r"\b(password|otp|verify account|pin)\b",
+            "payment_pressure": r"\b(wire|transfer|gift card|crypto|payment due)\b",
+            "short_link": r"(bit\.ly|tinyurl|t\.co|goo\.gl)",
+            "invoice_scare": r"\b(invoice|tax|refund|bill|arrears|penalty)\b",
+            "marketplace_delivery": r"\b(marketplace|delivery|parcel|shipment)\b",
+        }
+        cheap_scores = {}
+        for uid, blobs in text_blobs.items():
+            txt = " ".join(blobs)
+            hits = sum(1 for pat in patterns.values() if re.search(pat, txt))
+            cheap_scores[uid] = min(1.0, hits / 5)
+
+        llm_cfg = ctx.config.get("llm", {})
+        run_cfg = ctx.config.get("run", {})
+        llm = ctx.data.get("llm_client")
+        llm_budget = int(llm_cfg.get("max_messages_for_llm_review", 25))
+        should_use_llm = bool(llm and run_cfg.get("llm_enabled", True) and not run_cfg.get("disable_llm", False))
+        risky_users = tx.loc[tx["burst_30m"] > 0, "sender_id"].astype(str).unique().tolist()
+        ranked = sorted(cheap_scores.items(), key=lambda x: x[1], reverse=True)[:llm_budget]
+        selected_users = {uid for uid, _ in ranked if uid in risky_users or _ > 0.6}
+        llm_map: dict[str, float] = {}
+        llm_diag: dict[str, dict] = {}
+        if should_use_llm:
+            for uid in selected_users:
+                payload = {"messages": text_blobs.get(uid, [])[:6]}
+                prompt = COMMUNICATION_ANALYSIS_PROMPT.format(summary=json.dumps(payload, ensure_ascii=True))
+                raw = llm.complete(prompt, model=ctx.config.get("model_fast", "openai/gpt-4o-mini"))
+                try:
+                    parsed = json.loads(raw)
+                except Exception:
+                    parsed = {"scam_probability": 0.55, "urgency_score": 0.5, "reasoning_summary": str(raw)[:220]}
+                llm_score = float(parsed.get("scam_probability", 0.5)) * 0.7 + float(parsed.get("urgency_score", 0.5)) * 0.3
+                llm_map[uid] = min(1.0, max(0.0, llm_score))
+                llm_diag[uid] = parsed
+        score = tx["sender_id"].astype(str).map(lambda u: cheap_scores.get(u, 0.0) * 0.7 + llm_map.get(u, 0.0) * 0.3).fillna(0.0)
+        return AgentResult(
+            name=self.name,
+            evidence=pd.DataFrame(
+                {
+                    "transaction_id": tx["transaction_id"].astype(str),
+                    "score": score.astype(float).clip(0, 1),
+                    "confidence": np.where(score > 0, 0.72, 0.55),
+                    "reasons": [["comms-social-engineering"] for _ in range(len(tx))],
+                }
+            ),
+            diagnostics={"llm_reviews": len(llm_diag), "llm_structured": llm_diag},
+        )
 
 
 class RuleSynthesisAgent(Agent):
     name = "RuleSynthesisAgent"
 
     def run(self, ctx: PipelineContext) -> AgentResult:
-        f = ctx.features["matrix"]
-        suspicious = f.nlargest(30, "sender_amount_zproxy")
+        f = ctx.features["matrix"].copy()
+        suspicious = f.nlargest(40, "sender_amount_zproxy")
         cluster_dump = suspicious[["transaction_id", "sender_id", "recipient_id", "amount", "off_hours", "edge_novelty"]].to_dict("records")
         llm = ctx.data.get("llm_client")
         summary = "LLM disabled"
-        if llm and ctx.config.get("run", {}).get("llm_enabled", True):
+        if llm and ctx.config.get("run", {}).get("llm_enabled", True) and not ctx.config.get("run", {}).get("disable_llm", False):
             summary = llm.complete(PATTERN_SUMMARY_PROMPT.format(cluster_dump=cluster_dump), model=ctx.config.get("model_fast", "openai/gpt-4o-mini"))
         ev = pd.DataFrame({"transaction_id": f["transaction_id"], "score": 0.0, "confidence": 0.5, "reasons": [["rule-synthesis"] for _ in range(len(f))]})
-        return AgentResult(name=self.name, evidence=ev, diagnostics={"pattern_summary": summary})
+        return AgentResult(name=self.name, evidence=ev, diagnostics={"pattern_summary": summary, "clusters": cluster_dump[:10]})
+
+
+class PatternMemoryAgent(Agent):
+    name = "PatternMemoryAgent"
+
+    def run(self, ctx: PipelineContext) -> AgentResult:
+        f = ctx.features["matrix"].copy()
+        top = f.sort_values(["sender_amount_zproxy", "off_hours", "edge_novelty"], ascending=False).head(30)
+        motifs = []
+        for row in top.itertuples(index=False):
+            motif = f"{'late-night' if row.off_hours else 'daytime'}-{'new-recipient' if row.edge_novelty else 'known-recipient'}-amt-{int(min(max(row.amount, 0), 99999))}"
+            motifs.append({"transaction_id": str(row.transaction_id), "motif": motif, "score_hint": float(min(1.0, max(0.0, row.sender_amount_zproxy / 5)))})
+        motif_scores = {m["transaction_id"]: m["score_hint"] for m in motifs}
+        out_dir = Path(ctx.output_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        (out_dir / "patterns.json").write_text(json.dumps({"motifs": motifs[:200]}, indent=2, ensure_ascii=True), encoding="utf-8")
+        evidence = pd.DataFrame(
+            {
+                "transaction_id": f["transaction_id"].astype(str),
+                "score": f["transaction_id"].astype(str).map(motif_scores).fillna(0.0),
+                "confidence": 0.67,
+                "reasons": [["pattern-memory-match"] for _ in range(len(f))],
+            }
+        )
+        return AgentResult(name=self.name, evidence=evidence, diagnostics={"pattern_cards": motifs[:10]})
 
 
 class CaseManagerAgent(Agent):
@@ -103,7 +299,8 @@ class CaseManagerAgent(Agent):
         base["reasons"] = base[reason_cols].apply(lambda r: [x for x in r if x != 0], axis=1)
         score_cols = [c for c in base.columns if c.startswith("score_")]
         base["score"] = base[score_cols].mean(axis=1) if score_cols else 0.0
-        base["confidence"] = 0.75
+        conf_cols = [c for c in base.columns if c.startswith("conf_")]
+        base["confidence"] = base[conf_cols].mean(axis=1) if conf_cols else 0.7
         return AgentResult(name=self.name, evidence=base[["transaction_id", "score", "confidence", "reasons"]])
 
 
@@ -112,6 +309,35 @@ class DecisionAgent(Agent):
 
     def run(self, ctx: PipelineContext) -> AgentResult:
         cases = ctx.agent_outputs["CaseManagerAgent"].evidence.copy()
-        score = cases["score"].clip(0, 1)
-        cases["score"] = score
+        mode = ctx.config.get("run", {}).get("decision_mode", "conservative")
+        weight_map = ctx.config.get("ensemble", {}).get(
+            mode,
+            {
+                "TemporalBehaviorAgent": 0.24,
+                "NetworkRiskAgent": 0.2,
+                "GeoRiskAgent": 0.16,
+                "CommsRiskAgent": 0.18,
+                "PatternMemoryAgent": 0.14,
+                "RuleSynthesisAgent": 0.08,
+            },
+        )
+        weighted = []
+        reasons = []
+        for name, w in weight_map.items():
+            ev = ctx.agent_outputs.get(name)
+            if ev is None or ev.evidence.empty:
+                continue
+            part = ev.evidence[["transaction_id", "score"]].rename(columns={"score": f"s_{name}"})
+            weighted.append((w, part))
+            reasons.append(name)
+        for _, part in weighted:
+            cases = cases.merge(part, on="transaction_id", how="left")
+        score_cols = [c for c in cases.columns if c.startswith("s_")]
+        denom = sum(w for w, _ in weighted) or 1.0
+        agg = sum(cases[c].fillna(0) * w for w, c in [(w, f"s_{n}") for n, w in weight_map.items() if f"s_{n}" in cases.columns]) / denom
+        cases["score"] = agg.clip(0, 1)
+        cases["fraud_score"] = cases["score"]
+        cases["evidence_confidence"] = cases["confidence"].clip(0, 1)
+        cases["decision"] = np.where(cases["score"] >= ctx.config.get("thresholding", {}).get("prelim_decision_threshold", 0.72), "flag", "review")
+        cases["top_reasons"] = [reasons[:3] for _ in range(len(cases))]
         return AgentResult(name=self.name, evidence=cases)

@@ -5,6 +5,7 @@ from mirror.agents.agents import (
     CommsRiskAgent,
     DecisionAgent,
     GeoRiskAgent,
+    PatternMemoryAgent,
     NetworkRiskAgent,
     ProfilerAgent,
     RuleSynthesisAgent,
@@ -22,6 +23,7 @@ class Orchestrator:
             GeoRiskAgent(),
             CommsRiskAgent(),
             RuleSynthesisAgent(),
+            PatternMemoryAgent(),
             CaseManagerAgent(),
             DecisionAgent(),
         ]
