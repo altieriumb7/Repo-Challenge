@@ -1,0 +1,27 @@
+run:
+  random_seed: 42
+  llm_enabled: true
+  audio_enabled: false
+  output_submission_name: submission.txt
+
+thresholding:
+  min_suspect_fraction: 0.005
+  max_suspect_fraction: 0.2
+  target_suspect_fraction: 0.04
+
+llm:
+  timeout_seconds: 20
+  max_retries: 2
+  cluster_min_size: 5
+  borderline_max_cases: 25
+
+scenarios:
+  Deus Ex - train:
+    thresholding:
+      target_suspect_fraction: 0.05
+  Brave New World - train:
+    thresholding:
+      target_suspect_fraction: 0.035
+  The Truman Show - train:
+    thresholding:
+      target_suspect_fraction: 0.045
